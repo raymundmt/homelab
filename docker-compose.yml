@@ -1,15 +1,16 @@
 version: "3.9"
 
 services:
+  # --- Reverse Proxy / Entry Point ---
   traefik:
     image: traefik:v3.1
-    container_name: traefik
+    container_name: reverse-proxy
     command:
       - "--providers.docker=true"
       - "--entrypoints.web.address=:80"
       - "--entrypoints.websecure.address=:443"
       - "--api.dashboard=true"
-      - "--api.insecure=true" # disable this in production!
+      - "--api.insecure=true" # ⚠️ disable this in production
     ports:
       - "80:80"
       - "443:443"
@@ -17,36 +18,43 @@ services:
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock:ro"
       - "./configs/traefik:/etc/traefik"
+    networks:
+      - traefik_proxy
     restart: unless-stopped
 
+  # --- Docker Management UI ---
   portainer:
     image: portainer/portainer-ce:latest
     container_name: portainer
     command: -H unix:///var/run/docker.sock
-    ports:
-      - "9000:9000"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
       - "portainer_data:/data"
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.portainer.rule=Host(`portainer.localhost`)"
+      - "traefik.http.routers.portainer.rule=Host(`portainer.${DOMAIN}`)"
+      - "traefik.http.routers.portainer.entrypoints=web"
       - "traefik.http.services.portainer.loadbalancer.server.port=9000"
+    networks:
+      - traefik_proxy
     restart: unless-stopped
 
+  # --- Container Logs Viewer ---
   dozzle:
     image: amir20/dozzle:latest
     container_name: dozzle
-    ports:
-      - "9999:8080"
     volumes:
       - "/var/run/docker.sock:/var/run/docker.sock"
     labels:
       - "traefik.enable=true"
-      - "traefik.http.routers.dozzle.rule=Host(`dozzle.localhost`)"
+      - "traefik.http.routers.dozzle.rule=Host(`dozzle.${DOMAIN}`)"
+      - "traefik.http.routers.dozzle.entrypoints=web"
       - "traefik.http.services.dozzle.loadbalancer.server.port=8080"
+    networks:
+      - traefik_proxy
     restart: unless-stopped
 
+  # --- Auto-update Containers ---
   watchtower:
     image: containrrr/watchtower
     container_name: watchtower
@@ -55,5 +63,38 @@ services:
     command: --cleanup
     restart: unless-stopped
 
+  # --- Cloudflare Tunnel (no open ports needed) ---
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    command: tunnel run
+    environment:
+      - TUNNEL_TOKEN=${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - traefik_proxy
+    restart: unless-stopped
+
+  # --- Self-hosted GitHub Actions Runner ---
+  gh-runner:
+    image: myoung34/github-runner:latest
+    container_name: gh-runner
+    environment:
+      REPO_URL: "https://github.com/${GH_REPO}"
+      RUNNER_NAME: "homelab-runner"
+      RUNNER_TOKEN: ${GH_RUNNER_TOKEN}
+      RUNNER_WORKDIR: /tmp/github-runner
+      LABELS: selfhosted,homelab
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+    networks:
+      - traefik_proxy
+    restart: unless-stopped
+
+# --- Volumes ---
 volumes:
   portainer_data:
+
+# --- Networks ---
+networks:
+  traefik_proxy:
+    driver: bridge
